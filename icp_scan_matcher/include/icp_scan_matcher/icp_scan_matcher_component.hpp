@@ -1,0 +1,497 @@
+#include <Eigen/Dense>
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <utility>
+#include <execution>
+#include <mutex>
+#include <optional>
+// ROS
+#include <ros/ros.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <nav_msgs/Odometry.h>
+#include <tf/transform_listener.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_eigen/tf2_eigen.h>
+// PCL
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/approximate_voxel_grid.h>
+#include <pcl/segmentation/sac_segmentation.h>
+// other
+#include "common_lib/common_lib.hpp"
+#include "common_lib/filter/grid_point_observer.hpp"
+#include "common_lib/ros_utility/tf_util.hpp"
+#include "common_lib/ros_utility/msg_util.hpp"
+#include "common_lib/ros_utility/marker_util.hpp"
+#include "common_lib/ros_utility/ros_pcl_util.hpp"
+#include "common_lib/pcl_utility/pcl_util.hpp"
+
+#define _ENABLE_ATOMIC_ALIGNMENT_FIX
+//******************************************************************************
+// for文の実行方法設定
+//  #define LOOP_MODE std::execution::seq // 逐次実行
+//  #define LOOP_MODE std::execution::par // 並列実行
+#define LOOP_MODE std::execution::par_unseq // 並列化・ベクトル化
+// デバック関連設定
+#define DEBUG_OUTPUT
+// #define ICP_RESULT
+//  #define POINT_CLOUD_CHECH
+//******************************************************************************
+using namespace common_lib;
+class ICPScanMatcher
+{
+public:
+	ICPScanMatcher(ros::NodeHandle &nh) : nh_(nh)
+	{
+		ROS_INFO("start");
+		// param
+		grid_point_observe_parameter_t gpo_param;
+		std::string CLOUD_TOPIC, ODOM_TOPIC;
+		nh_.param<std::string>("cloud", CLOUD_TOPIC, "/camera/depth_registered/points");
+		nh_.param<std::string>("odom", ODOM_TOPIC, "/mercury_mega/robot_pose");
+		// frame
+		nh_.param<std::string>("field_frame", FIELD_FRAME, "field");
+		nh_.param<std::string>("odom_frame", ODOM_FRAME, "odom");
+		nh_.param<std::string>("robot_frame", ROBOT_FRAME, "base_link");
+		// setup
+		nh_.param<double>("broadcast_period", BROADCAST_PERIOD, 0.001);
+		nh_.param<bool>("odom_tf_broadcast", ODOM_TF, true);
+		// 点群パラメータ
+		nh_.param<int>("min_point_cloud_size", MIN_CLOUD_SIZE, 100);
+		nh_.param<double>("voxelgrid_size", VOXELGRID_SIZE, 0.06);
+		// scan matchingパラメータ
+		nh_.param<double>("target_voxelgrid_size", TARGET_VOXELGRID_SIZE, 0.5);
+		nh_.param<double>("target_update_min_score", TARGET_UPDATE_MIN_SCORE, 0.0005);
+		nh_.param<double>("min_score_limit", MIN_SCORE_LIMIT, 0.01);
+		// kalman filter
+		double POS_Q, RPY_Q, POS_R, RPY_R;
+		nh_.param<double>("pos_Q", POS_Q, 0.2);
+		nh_.param<double>("rpy_Q", RPY_Q, 0.2);
+		nh_.param<double>("pos_R", POS_R, 0.7);
+		nh_.param<double>("rpy_R", RPY_R, 0.7);
+		// grid point observe
+		nh_.param<double>("grid_width", gpo_param.grid_width, 0.01);
+		nh_.param<double>("min_gain_position", gpo_param.min_gain_position, 0.1);
+		nh_.param<double>("min_gain_orientation", gpo_param.min_gain_orientation, 0.03);
+		nh_.param<double>("max_gain_position", gpo_param.max_gain_position, 0.4);
+		nh_.param<double>("max_gain_orientation", gpo_param.max_gain_orientation, 0.1);
+		// robotパラメータ
+		nh_.param<double>("min_velocity", MIN_VEL, 0.01);
+		nh_.param<double>("min_angular", MIN_ANGULAR, 0.01);
+		nh_.param<double>("max_velocity", MAX_VEL, 5.0);
+		nh_.param<double>("max_angular", gpo_param.max_angular, 5.0);
+		// 外れ値
+		nh_.param<double>("outlier_distance", OUTLIER_DIST, 5.0);
+		// init
+		gpo_param.max_velocity = MAX_VEL;
+		gpo_.set_params(gpo_param);
+		odom_pose_.position = laser_pose_.position = estimate_pose_.position = {0.0, 0.0, 0.0};
+		odom_pose_.orientation = laser_pose_.orientation = estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
+		laser_pose_msg_.pose.orientation.w = 1.0;
+		initialization_ = true;
+		update_cloud_ = false;
+		pos_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
+		Eigen::Vector3d g_vec, q_vec, r_vec;
+		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
+		pos_klf_.G = g_vec.asDiagonal();
+		pos_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
+		q_vec << POS_Q, POS_Q, POS_Q;
+		pos_klf_.Q = q_vec.asDiagonal();
+		r_vec << POS_R, POS_R, POS_R;
+		pos_klf_.R = r_vec.asDiagonal();
+
+		rpy_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
+		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
+		rpy_klf_.G = g_vec.asDiagonal();
+		rpy_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
+		q_vec << RPY_Q, RPY_Q, RPY_Q;
+		rpy_klf_.Q = q_vec.asDiagonal();
+		r_vec << RPY_R, RPY_R, RPY_R;
+		rpy_klf_.R = r_vec.asDiagonal();
+		// timer
+		main_timer_ = nh_.createTimer(ros::Duration(BROADCAST_PERIOD), &ICPScanMatcher::MainTimerCallback, this);
+		// publisher
+		odom_pub_ = nh_.advertise<nav_msgs::Odometry>("/mercury_mega/odom", 1, true);
+		laser_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/mercury_mega/laser_pose", 1, true);
+		debug_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("debug_points", 1, true);
+		now_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("now_points", 1, true);
+		old_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("old_points", 1, true);
+		icp_final_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("icp_final_points", 1, true);
+		// subscriber
+		odom_sub_ = nh_.subscribe(ODOM_TOPIC, 1, &ICPScanMatcher::OdomCallback, this);
+		cloud_sub_ = nh_.subscribe(CLOUD_TOPIC, 1, &ICPScanMatcher::PointCloudCallback, this);
+		//  tf2
+		tf_listener_ =
+				std::make_shared<tf2_ros::TransformListener>(tf_buffer_);
+	}
+
+	void update_target_cloud(double score, const pcl::PointCloud<pcl::PointXYZ> &input_cloud)
+	{
+		if (!update_cloud_)
+		{
+			if (score < TARGET_UPDATE_MIN_SCORE)
+			{
+				old_cloud_ += input_cloud;
+				//  Down sampling
+				old_cloud_ = voxelgrid_filter(old_cloud_, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE);
+				update_cloud_ = true;
+			}
+		}
+	}
+
+	// callback
+	void OdomCallback(const nav_msgs::Odometry::ConstPtr &msg)
+	{
+		// #if defined(DEBUG_OUTPUT)
+		// 		std::cout << "get odom" << std::endl;
+		// #endif
+		nav_msgs::Odometry odom;
+		odom = *msg;
+		odom.header = make_header(ODOM_FRAME, ros::Time::now());
+		odom_pub_.publish(odom);
+		odom_linear_.x = odom.twist.twist.linear.x;
+		odom_linear_.y = odom.twist.twist.linear.y;
+		odom_linear_.z = odom.twist.twist.linear.z;
+		odom_angular_.x = odom.twist.twist.angular.x;
+		odom_angular_.y = odom.twist.twist.angular.y;
+		odom_angular_.z = odom.twist.twist.angular.z;
+		odom_pose_.position.x = odom.pose.pose.position.x;
+		odom_pose_.position.y = odom.pose.pose.position.y;
+		odom_pose_.position.z = odom.pose.pose.position.z;
+		odom_pose_.orientation.x = odom.pose.pose.orientation.x;
+		odom_pose_.orientation.y = odom.pose.pose.orientation.y;
+		odom_pose_.orientation.z = odom.pose.pose.orientation.z;
+		odom_pose_.orientation.w = odom.pose.pose.orientation.w;
+		if (initialization_)
+		{
+			init_odom_pose_ = odom_pose_;
+			Eigen::Vector3d x0;
+			x0 << 0.0, 0.0, 0.0;
+			Eigen::Matrix<double, 3, 3> p0 = Eigen::Matrix<double, 3, 3>::Zero();
+			pos_klf_.reset(x0, p0);
+			rpy_klf_.reset(x0, p0);
+			gpo_.set_initial_position({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+			initialization_ = false;
+		}
+		Vector3d init_rpy = init_odom_pose_.orientation.get_rpy();
+		Vector3d odom_rpy = odom_pose_.orientation.get_rpy();
+		Vector3d rpy = odom_rpy - init_rpy;
+		odom_pose_.position -= init_odom_pose_.position;
+		odom_pose_.position.rotate(-init_rpy);
+		odom_pose_.orientation.set_rpy(rpy.x, rpy.y, rpy.z);
+		// grid point observe
+		gpo_.set_deadreckoning(odom_pose_.position, rpy, odom_linear_, odom_angular_);
+	}
+
+	void PointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
+	{
+		static uint64_t num = 1;
+		static long double sum = 0.;
+		static long double ssum = 0.;
+#if defined(DEBUG_OUTPUT)
+		std::cout << "----------------------------------------------------------------------------------" << std::endl;
+		std::cout << "get cloud" << std::endl;
+#endif
+		sensor_msgs::PointCloud2 get_cloud;
+		get_cloud = *msg;
+		std::string CAMERA_FRAME = "mercury/camera_link";
+		get_cloud.header.frame_id = CAMERA_FRAME;
+		debug_cloud_pub_.publish(get_cloud);
+		std::optional<sensor_msgs::PointCloud2> trans_cloud = transform_pointcloud2(tf_buffer_, FIELD_FRAME, get_cloud);
+		if (trans_cloud)
+		{
+			// msg convert
+			pcl::PointCloud<pcl::PointXYZ> now_cloud;
+			pcl::fromROSMsg(trans_cloud.value(), now_cloud);
+			if (!now_cloud.empty())
+			{
+				//  Down sampling
+				now_cloud = voxelgrid_filter(now_cloud, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
+				now_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, now_cloud));
+				if (initialization_)
+				{
+#if defined(DEBUG_OUTPUT)
+					std::cout << "Initialization" << std::endl;
+					std::cout << "now_cloud size:" << now_cloud.points.size() << "|old_cloud size:" << old_cloud_.points.size() << std::endl;
+#endif
+					// nan値除去
+					std::vector<int> mapping;
+					pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping);
+					old_cloud_ = now_cloud;
+
+					sum = 0.;
+					ssum = 0.;
+					num = 1;
+				}
+				else if (!old_cloud_.empty())
+				{
+#if defined(DEBUG_OUTPUT)
+					std::cout << "now_cloud size:" << now_cloud.points.size() << "|old_cloud size:" << old_cloud_.points.size() << std::endl;
+#endif
+					if (now_cloud.points.size() > MIN_CLOUD_SIZE)
+					{
+						// nan値除去
+						std::vector<int> mapping1, mapping2;
+						pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping1);
+						pcl::removeNaNFromPointCloud(old_cloud_, old_cloud_, mapping2);
+						old_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, old_cloud_));
+
+#if defined(POINT_CLOUD_CHECH)
+						// nan値がないことのチェック
+						pcl::DefaultPointRepresentation<pcl::PointXYZ> representation;
+						std::cout << "old cloud" << std::endl;
+						for (int i = 0; i < old_cloud_.points.size(); ++i)
+						{
+							if (!representation.isValid(old_cloud_.points[i]))
+								std::cout << "invalid1 " << i << " " << old_cloud_.points[i] << std::endl;
+						}
+						std::cout << "now cloud" << std::endl;
+						for (int i = 0; i < now_cloud.points.size(); ++i)
+						{
+							if (!representation.isValid(now_cloud.points[i]))
+								std::cout << "invalid2 " << i << " " << now_cloud.points[i] << std::endl;
+						}
+#endif
+
+						// ICP
+						const auto &result = iterative_closest_point(now_cloud, old_cloud_);
+						if (result)
+						{
+							auto &[score, tmat, final_cloud] = result.value();
+							icp_final_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, final_cloud));
+#if defined(DEBUG_OUTPUT)
+							std::cout << "ICP has converged, score is " << score << std::endl;
+#endif
+							if (score < MIN_SCORE_LIMIT)
+							{
+#if defined(ICP_RESULT)
+								std::cout << "rotation matrix" << std::endl;
+								for (int i = 0; i < 3; ++i)
+								{
+									std::cout << tmat(i, 0) << ", " << tmat(i, 1) << ", " << tmat(i, 2) << std::endl;
+								}
+								std::cout << std::endl;
+								std::cout << "translation vector" << std::endl;
+								std::cout << tmat(0, 3) << ", " << tmat(1, 3) << ", " << tmat(2, 3) << std::endl;
+#endif
+								// calc laser position
+								laser_pose_ = estimate_pose_;
+								Vector3d rpy = laser_pose_.orientation.get_rpy();
+								Vector3d diff_rpy = {std::atan2(tmat(2, 1), tmat(2, 2)), -std::asin(tmat(2, 0)), std::atan2(tmat(1, 0), tmat(0, 0))};
+								Vector3d diff_pos = {tmat(0, 3), tmat(1, 3), tmat(2, 3)};
+
+								// 一つ前の推定値との距離計算
+								double delta_dist = Vector3d::distance(diff_pos, old_diff_pos_);
+								old_diff_pos_ = diff_pos;
+								// 外れ値判定
+								// 平均値計算
+								double ave_delta_dist = sum / (double)num;
+								// 標準偏差計算
+								double std_delta_dist = std::sqrt(ssum / (double)num - ave_delta_dist * ave_delta_dist);
+								if (approx_zero(std_delta_dist)) // 0除算回避
+									std_delta_dist = 1.0;
+								// マハラノビス距離
+								double mahalanobis_dist = std::abs(delta_dist - ave_delta_dist) / std_delta_dist;
+#if defined(DEBUG_OUTPUT)
+								std::cout << "delta_dist:" << delta_dist << std::endl;
+								std::cout << "ave_delta_dist:" << ave_delta_dist << std::endl;
+								std::cout << "std_delta_dist:" << std_delta_dist << std::endl;
+								std::cout << "mahalanobis_dist:" << mahalanobis_dist << std::endl;
+#endif
+								if (mahalanobis_dist < OUTLIER_DIST)
+								{
+									sum += delta_dist;
+									ssum += delta_dist * delta_dist;
+									num++;
+
+									double diff_t = (double)(ros::Time::now() - get_cloud.header.stamp).toSec();
+									Vector3d corr_pos = {odom_linear_.x * diff_t, odom_linear_.y * diff_t, odom_linear_.z * diff_t};
+									Vector3d corr_rpy = {odom_angular_.x * diff_t, odom_angular_.y * diff_t, odom_angular_.z * diff_t};
+									diff_pos += corr_pos;
+									diff_rpy += corr_rpy;
+
+									rpy += diff_rpy;
+									laser_pose_.position += diff_pos;
+#if defined(DEBUG_OUTPUT)
+									std::cout << "diff_pos:" << diff_pos << "|diff_rpy:" << diff_rpy << std::endl;
+									std::cout << "pos:" << laser_pose_.position << "|rpy" << rpy << std::endl;
+									std::cout << "norm pos:" << diff_pos.norm() << "|rpy:" << diff_rpy.norm() << std::endl;
+#endif
+									// filter
+									static auto pre_time = ros::Time::now();
+									double dt = (ros::Time::now() - pre_time).toSec();
+									pre_time = ros::Time::now();
+									if (approx_zero(dt))
+									{
+										Eigen::Vector3d g_vec;
+										g_vec << dt, dt, dt;
+										pos_klf_.G = g_vec.asDiagonal();
+										rpy_klf_.G = g_vec.asDiagonal();
+									}
+									Eigen::Vector3d u, z;
+									u << odom_linear_.x, odom_linear_.y, odom_linear_.z;
+									z << laser_pose_.position.x, laser_pose_.position.y, laser_pose_.position.z;
+									auto x = pos_klf_.filtering(u, z);
+									laser_pose_.position = {x(0), x(1), x(2)};
+
+									u << odom_angular_.x, odom_angular_.y, odom_angular_.z;
+									z << rpy.x, rpy.y, rpy.z;
+									x = rpy_klf_.filtering(u, z);
+									laser_pose_.orientation.set_rpy(x(0), x(1), x(2));
+									// grid point observe
+									gpo_.set_starreckoning(laser_pose_.position, {x(0), x(1), x(2)});
+									// update point cloud
+									double velocity = odom_linear_.norm(); // 並進速度の大きさ//std::hypot(odom_linear_.x, odom_linear_.y, odom_linear_.z);
+									double angular = odom_angular_.norm(); // 回転速度の大きさ//std::hypot(odom_angular_.x, odom_angular_.y, odom_angular_.z);
+									if (angular < MIN_ANGULAR)						 // 並進移動時のみ更新する
+									{
+										if (velocity > MIN_VEL)
+											update_cloud_ = false;
+										if (velocity < MAX_VEL)
+											update_target_cloud(score, final_cloud);
+									}
+									else
+										update_cloud_ = false;
+#if defined(DEBUG_OUTPUT)
+									std::cout << "velocity " << velocity << "|angular " << angular << std::endl;
+									std::cout << "laser pose" << std::endl;
+									std::cout << laser_pose_ << std::endl;
+#endif
+								}
+							}
+						}
+						else
+							ROS_ERROR("ICP has not converged.");
+					}
+				}
+				else
+					old_cloud_ = now_cloud;
+			}
+			else
+				ROS_ERROR("now_cloud empty");
+		}
+		else
+			ROS_ERROR("transform error");
+		// debug output
+		// laser_pose_msg_.header = make_header(ODOM_FRAME, ros::Time::now());
+		laser_pose_msg_.header = make_header(FIELD_FRAME, ros::Time::now());
+		laser_pose_msg_.pose = make_geometry_pose(laser_pose_);
+		laser_pose_pub_.publish(laser_pose_msg_);
+	}
+
+	void MainTimerCallback(const ros::TimerEvent &e)
+	{
+		// grid point observe
+		const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
+		estimate_pose_.position = estimate_position;
+		estimate_pose_.orientation.set_rpy(estimate_orientation.x, estimate_orientation.y, estimate_orientation.z);
+		// field -> odom tf
+		geometry_msgs::TransformStamped transformstamped;
+		if (ODOM_TF)
+		{
+			transformstamped.header = make_header(FIELD_FRAME, ros::Time::now());
+			transformstamped.child_frame_id = ODOM_FRAME;
+			transformstamped.transform.translation.x = odom_pose_.position.x;
+			transformstamped.transform.translation.y = odom_pose_.position.y;
+			transformstamped.transform.translation.z = odom_pose_.position.z;
+			transformstamped.transform.rotation.x = odom_pose_.orientation.x;
+			transformstamped.transform.rotation.y = odom_pose_.orientation.y;
+			transformstamped.transform.rotation.z = odom_pose_.orientation.z;
+			transformstamped.transform.rotation.w = odom_pose_.orientation.w;
+			br_.sendTransform(transformstamped);
+		}
+		// odom -> base_link tf
+		// transformstamped.header = make_header(ODOM_FRAME, ros::Time::now());
+		transformstamped.header = make_header(FIELD_FRAME, ros::Time::now());
+		transformstamped.child_frame_id = ROBOT_FRAME;
+		if (estimate_pose_.position.has_nan() || estimate_pose_.orientation.has_nan())
+		{
+			estimate_pose_.position = {0.0, 0.0, 0.0};
+			estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
+		}
+		transformstamped.transform.translation.x = estimate_pose_.position.x;
+		transformstamped.transform.translation.y = estimate_pose_.position.y;
+		transformstamped.transform.translation.z = estimate_pose_.position.z;
+		transformstamped.transform.rotation.x = estimate_pose_.orientation.x;
+		transformstamped.transform.rotation.y = estimate_pose_.orientation.y;
+		transformstamped.transform.rotation.z = estimate_pose_.orientation.z;
+		transformstamped.transform.rotation.w = estimate_pose_.orientation.w;
+
+		// transformstamped.transform.translation.x = laser_pose_.position.x;
+		// transformstamped.transform.translation.y = laser_pose_.position.y;
+		// transformstamped.transform.translation.z = laser_pose_.position.z;
+		// transformstamped.transform.rotation.x = laser_pose_.orientation.x;
+		// transformstamped.transform.rotation.y = laser_pose_.orientation.y;
+		// transformstamped.transform.rotation.z = laser_pose_.orientation.z;
+		// transformstamped.transform.rotation.w = laser_pose_.orientation.w;
+
+		br_.sendTransform(transformstamped);
+	}
+
+private:
+	bool initialization_;
+	bool update_cloud_;
+	// param
+	std::string FIELD_FRAME;
+	std::string ROBOT_FRAME;
+	std::string ODOM_FRAME;
+	double BROADCAST_PERIOD;
+	int MIN_CLOUD_SIZE;
+	double VOXELGRID_SIZE;
+	double TARGET_VOXELGRID_SIZE;
+	double MIN_SCORE_LIMIT;
+	double TARGET_UPDATE_MIN_SCORE;
+	double MIN_VEL;
+	double MIN_ANGULAR;
+	double MAX_VEL;
+	double OUTLIER_DIST;
+	bool ODOM_TF;
+	// マルチスレッド関連
+	inline static std::mutex mtx;
+	// node handle
+	ros::NodeHandle nh_;
+	// timer
+	ros::Timer main_timer_;
+	// subscriber
+	ros::Subscriber odom_sub_;
+	ros::Subscriber cloud_sub_;
+	// publisher
+	ros::Publisher odom_pub_;
+	ros::Publisher laser_pose_pub_;
+	ros::Publisher debug_cloud_pub_;
+	ros::Publisher now_cloud_pub_;
+	ros::Publisher old_cloud_pub_;
+	ros::Publisher icp_final_cloud_pub_;
+	// filter
+	KalmanFilter<double, 3, 3, 3> pos_klf_;
+	KalmanFilter<double, 3, 3, 3> rpy_klf_;
+	GridPointObserver gpo_;
+	// tf
+	tf2_ros::TransformBroadcaster br_;
+	tf2_ros::Buffer tf_buffer_;
+	std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+	// cloud
+	pcl::PointCloud<pcl::PointXYZ> old_cloud_;
+	// pose
+	Pose3d laser_pose_;
+	Pose3d odom_pose_;
+	Pose3d init_odom_pose_;
+	Pose3d estimate_pose_;
+	geometry_msgs::PoseStamped laser_pose_msg_;
+
+	Vector3d old_diff_pos_;
+	// Vector3d old_diff_rpy_;
+	// vel
+	Vector3d odom_linear_;
+	Vector3d odom_angular_;
+};
