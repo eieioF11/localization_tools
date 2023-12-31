@@ -16,7 +16,7 @@
 #include <laser_geometry/laser_geometry.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
-#include "common_lib/ros2_utility/extension_node.hpp"
+#include "extension_node/extension_node.hpp"
 #include "common_lib/ros2_utility/ros_pcl_util.hpp"
 #include "common_lib/ros2_utility/msg_util.hpp"
 #include "common_lib/ros2_utility/tf_util.hpp"
