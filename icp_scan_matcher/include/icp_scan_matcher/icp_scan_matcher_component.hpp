@@ -35,7 +35,6 @@
 // デバック関連設定
 #define DEBUG_OUTPUT
 // #define ICP_RESULT
-// #define POINT_CLOUD_CHECH
 //******************************************************************************
 using namespace common_lib;
 using namespace std::chrono_literals;
@@ -43,46 +42,43 @@ class ICPScanMatcher : public ExtensionNode
 {
 public:
 	ICPScanMatcher(const rclcpp::NodeOptions &options) : ICPScanMatcher("", options) {}
-	ICPScanMatcher(const std::string &name_space = "", const rclcpp::NodeOptions &options = rclcpp::NodeOptions()) : ExtensionNode("icp_scan_matcher_node", name_space, options), tf_buffer_(this->get_clock()), listener_(tf_buffer_)
+	ICPScanMatcher(const std::string &name_space = "", const rclcpp::NodeOptions &options = rclcpp::NodeOptions()) : ExtensionNode("icp_scan_matcher_node", name_space, options), broadcaster_(this), tf_buffer_(this->get_clock()), listener_(tf_buffer_)
 	{
 		RCLCPP_INFO(this->get_logger(), "start icp_scan_matcher_node");
 		// get param
-		std::string CLOUD_TOPIC = param<std::string>("cloud", "/camera/depth_registered/points");
-		std::string ODOM_TOPIC = param<std::string>("odom", "/odom");
+		std::string CLOUD_TOPIC = param<std::string>("icp_scan_matcher.topic_name.cloud", "/camera/depth_registered/points");
+		std::string ODOM_TOPIC = param<std::string>("icp_scan_matcher.topic_name.odom", "/odom");
 		// frame
-		// FIELD_FRAME = param<std::string>("field_frame", "field");
-		FIELD_FRAME = param<std::string>("field_frame", "base_link");
-		ODOM_FRAME = param<std::string>("odom_frame", "odom");
-		ROBOT_FRAME = param<std::string>("robot_frame", "base_link");
+		FIELD_FRAME = param<std::string>("icp_scan_matcher.tf_frame.map_frame", "map");
+		ODOM_FRAME = param<std::string>("icp_scan_matcher.tf_frame.odom_frame", "odom");
+		ROBOT_FRAME = param<std::string>("icp_scan_matcher.tf_frame.robot_frame", "base_link");
 		// setup
-		BROADCAST_PERIOD = param<double>("broadcast_period", 0.001);
-		ODOM_TF = param<bool>("odom_tf_broadcast", true);
+		BROADCAST_PERIOD = param<double>("icp_scan_matcher.broadcast_period", 0.001);
+		ODOM_TF = param<bool>("icp_scan_matcher.odom_tf_broadcast", true);
 		// 点群パラメータ
-		MIN_CLOUD_SIZE = param<int>("min_point_cloud_size", 100);
-		VOXELGRID_SIZE = param<double>("voxelgrid_size", 0.06);
+		MIN_CLOUD_SIZE = param<int>("icp_scan_matcher.min_point_cloud_size", 100);
+		VOXELGRID_SIZE = param<double>("icp_scan_matcher.voxelgrid_size", 0.06);
 		// scan matchingパラメータ
-		TARGET_VOXELGRID_SIZE = param<double>("target_voxelgrid_size", 0.1);
-		TARGET_UPDATE_MIN_SCORE = param<double>("target_update_min_score", 0.0005);
-		MIN_SCORE_LIMIT = param<double>("min_score_limit", 0.01);
+		TARGET_VOXELGRID_SIZE = param<double>("icp_scan_matcher.target_voxelgrid_size", 0.1);
+		TARGET_UPDATE_MIN_SCORE = param<double>("icp_scan_matcher.target_update_min_score", 0.0005);
+		MIN_SCORE_LIMIT = param<double>("icp_scan_matcher.min_score_limit", 0.01);
 		// kalman filter
-		double POS_Q = param<double>("pos_Q", 0.2);
-		double RPY_Q = param<double>("rpy_Q", 0.2);
-		double POS_R = param<double>("pos_R", 0.7);
-		double RPY_R = param<double>("rpy_R", 0.7);
+		std::vector<double> K_Q = param<std::vector<double>>("icp_scan_matcher.kalman_filter.pos_Q", {0.2,0.2,0.2,0.2,0.2,0.2});
+		std::vector<double> K_R = param<std::vector<double>>("icp_scan_matcher.kalman_filter.pos_R", {0.7,0.7,0.7,0.7,0.7,0.7});
 		// grid point observe
 		grid_point_observe_parameter_t gpo_param;
-		gpo_param.grid_width = param<double>("grid_width", 0.01);
-		gpo_param.min_gain_position = param<double>("min_gain_position", 0.1);
-		gpo_param.min_gain_orientation = param<double>("min_gain_orientation", 0.03);
-		gpo_param.max_gain_position = param<double>("max_gain_position", 0.4);
-		gpo_param.max_gain_orientation = param<double>("max_gain_orientation", 0.1);
+		gpo_param.grid_width = param<double>("icp_scan_matcher.grid_width", 0.01);
+		gpo_param.min_gain_position = param<double>("icp_scan_matcher.min_gain_position", 0.1);
+		gpo_param.min_gain_orientation = param<double>("icp_scan_matcher.min_gain_orientation", 0.03);
+		gpo_param.max_gain_position = param<double>("icp_scan_matcher.max_gain_position", 0.4);
+		gpo_param.max_gain_orientation = param<double>("icp_scan_matcher.max_gain_orientation", 0.1);
 		// robotパラメータ
-		MIN_VEL = param<double>("min_velocity", 0.01);
-		MIN_ANGULAR = param<double>("min_angular", 0.01);
-		MAX_VEL = param<double>("max_velocity", 5.0);
-		gpo_param.max_angular = param<double>("max_angular", 5.0);
+		MIN_VEL = param<double>("icp_scan_matcher.robot.min_velocity", 0.01);
+		MIN_ANGULAR = param<double>("icp_scan_matcher.robot.min_angular", 0.01);
+		MAX_VEL = param<double>("icp_scan_matcher.robot.max_velocity", 5.0);
+		gpo_param.max_angular = param<double>("icp_scan_matcher.robot.max_angular", 5.0);
 		// 外れ値
-		OUTLIER_DIST = param<double>("outlier_distance", 5.0);
+		OUTLIER_DIST = param<double>("icp_scan_matcher.outlier_distance", 5.0);
 		// init
 		gpo_param.max_velocity = MAX_VEL;
 		gpo_.set_params(gpo_param);
@@ -96,18 +92,18 @@ public:
 		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
 		pos_klf_.G = g_vec.asDiagonal();
 		pos_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
-		q_vec << POS_Q, POS_Q, POS_Q;
+		q_vec << K_Q[0], K_Q[1], K_Q[2];
 		pos_klf_.Q = q_vec.asDiagonal();
-		r_vec << POS_R, POS_R, POS_R;
+		r_vec << K_R[0], K_R[1], K_R[2];
 		pos_klf_.R = r_vec.asDiagonal();
 
 		rpy_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
 		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
 		rpy_klf_.G = g_vec.asDiagonal();
 		rpy_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
-		q_vec << RPY_Q, RPY_Q, RPY_Q;
+		q_vec << K_Q[3], K_Q[4], K_Q[5];
 		rpy_klf_.Q = q_vec.asDiagonal();
-		r_vec << RPY_R, RPY_R, RPY_R;
+		r_vec << K_R[3], K_R[4], K_R[5];
 		rpy_klf_.R = r_vec.asDiagonal();
 		// publisher
 		laser_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("icp_scan_matcher/laser_pose", rclcpp::QoS(10).best_effort());
@@ -119,7 +115,33 @@ public:
 		odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(ODOM_TOPIC, rclcpp::QoS(10), std::bind(&ICPScanMatcher::odometry_callback, this, std::placeholders::_1));
 		cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(CLOUD_TOPIC, rclcpp::QoS(10).best_effort(), std::bind(&ICPScanMatcher::pointcloud_callback, this, std::placeholders::_1));
 		// timer
-		main_timer_ = this->create_wall_timer(1ms, [&]() {});
+		main_timer_ = this->create_wall_timer(1ms, [&](){
+			// grid point observe
+			const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
+			estimate_pose_.position = estimate_position;
+			estimate_pose_.orientation.set_rpy(estimate_orientation.x, estimate_orientation.y, estimate_orientation.z);
+			// map -> odom tf
+			if (ODOM_TF)
+			{
+				geometry_msgs::msg::TransformStamped transform_stamped;
+				transform_stamped.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
+				transform_stamped.child_frame_id = ODOM_FRAME;
+				transform_stamped.transform = make_geometry_transform(odom_pose_);
+				broadcaster_.sendTransform(transform_stamped);
+			}
+			// map -> base_link tf
+			if (estimate_pose_.position.has_nan() || estimate_pose_.orientation.has_nan())
+			{
+				estimate_pose_.position = {0.0, 0.0, 0.0};
+				estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
+			}
+
+			geometry_msgs::msg::TransformStamped transform_stamped;
+			transform_stamped.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
+			transform_stamped.child_frame_id = ROBOT_FRAME;
+			transform_stamped.transform = make_geometry_transform(estimate_pose_);
+			broadcaster_.sendTransform(transform_stamped);
+			});
 	}
 
 	// callback
@@ -180,23 +202,6 @@ public:
 						pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping1);
 						pcl::removeNaNFromPointCloud(old_cloud_, old_cloud_, mapping2);
 						old_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), old_cloud_));
-
-#if defined(POINT_CLOUD_CHECH)
-						// nan値がないことのチェック
-						pcl::DefaultPointRepresentation<pcl::PointXYZ> representation;
-						std::cout << "old cloud" << std::endl;
-						for (int i = 0; i < old_cloud_.points.size(); ++i)
-						{
-							if (!representation.isValid(old_cloud_.points[i]))
-								std::cout << "invalid1 " << i << " " << old_cloud_.points[i] << std::endl;
-						}
-						std::cout << "now cloud" << std::endl;
-						for (int i = 0; i < now_cloud.points.size(); ++i)
-						{
-							if (!representation.isValid(now_cloud.points[i]))
-								std::cout << "invalid2 " << i << " " << now_cloud.points[i] << std::endl;
-						}
-#endif
 
 						// ICP
 						const auto &result = iterative_closest_point(now_cloud, old_cloud_);
@@ -346,6 +351,7 @@ private:
 	// マルチスレッド関連
 	inline static std::mutex mtx;
 	// tf
+	tf2_ros::TransformBroadcaster broadcaster_;
 	tf2_ros::Buffer tf_buffer_;
 	tf2_ros::TransformListener listener_;
 	// timer
