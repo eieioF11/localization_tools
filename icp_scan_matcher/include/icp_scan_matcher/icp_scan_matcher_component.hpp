@@ -1,4 +1,4 @@
-#include <Eigen/Dense>
+#pragma once
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -7,34 +7,24 @@
 #include <execution>
 #include <mutex>
 #include <optional>
+// Eigen
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
 // ROS
-#include <ros/ros.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <nav_msgs/Odometry.h>
-#include <tf/transform_listener.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <laser_geometry/laser_geometry.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+
+#include "common_lib/ros2_utility/extension_node.hpp"
+#include "common_lib/ros2_utility/ros_pcl_util.hpp"
+#include "common_lib/ros2_utility/msg_util.hpp"
+#include "common_lib/ros2_utility/tf_util.hpp"
+// #include "common_lib/ros2_utility/marker_util.hpp"
 // PCL
-#include <pcl_conversions/pcl_conversions.h>
-#include <pcl/conversions.h>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/common/transforms.h>
-#include <pcl/filters/passthrough.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/approximate_voxel_grid.h>
-#include <pcl/segmentation/sac_segmentation.h>
+#include "common_lib/pcl_utility/pcl_util.hpp"
 // other
 #include "common_lib/common_lib.hpp"
-#include "common_lib/filter/grid_point_observer.hpp"
-#include "common_lib/ros_utility/tf_util.hpp"
-#include "common_lib/ros_utility/msg_util.hpp"
-#include "common_lib/ros_utility/marker_util.hpp"
-#include "common_lib/ros_utility/ros_pcl_util.hpp"
-#include "common_lib/pcl_utility/pcl_util.hpp"
 
 #define _ENABLE_ATOMIC_ALIGNMENT_FIX
 //******************************************************************************
@@ -45,53 +35,54 @@
 // デバック関連設定
 #define DEBUG_OUTPUT
 // #define ICP_RESULT
-//  #define POINT_CLOUD_CHECH
+// #define POINT_CLOUD_CHECH
 //******************************************************************************
 using namespace common_lib;
-class ICPScanMatcher
+using namespace std::chrono_literals;
+class ICPScanMatcher : public ExtensionNode
 {
 public:
-	ICPScanMatcher(ros::NodeHandle &nh) : nh_(nh)
+	ICPScanMatcher(const rclcpp::NodeOptions &options) : ICPScanMatcher("", options) {}
+	ICPScanMatcher(const std::string &name_space = "", const rclcpp::NodeOptions &options = rclcpp::NodeOptions()) : ExtensionNode("icp_scan_matcher_node", name_space, options), tf_buffer_(this->get_clock()), listener_(tf_buffer_)
 	{
-		ROS_INFO("start");
-		// param
-		grid_point_observe_parameter_t gpo_param;
-		std::string CLOUD_TOPIC, ODOM_TOPIC;
-		nh_.param<std::string>("cloud", CLOUD_TOPIC, "/camera/depth_registered/points");
-		nh_.param<std::string>("odom", ODOM_TOPIC, "/mercury_mega/robot_pose");
+		RCLCPP_INFO(this->get_logger(), "start icp_scan_matcher_node");
+		// get param
+		std::string CLOUD_TOPIC = param<std::string>("cloud", "/camera/depth_registered/points");
+		std::string ODOM_TOPIC = param<std::string>("odom", "/odom");
 		// frame
-		nh_.param<std::string>("field_frame", FIELD_FRAME, "field");
-		nh_.param<std::string>("odom_frame", ODOM_FRAME, "odom");
-		nh_.param<std::string>("robot_frame", ROBOT_FRAME, "base_link");
+		// FIELD_FRAME = param<std::string>("field_frame", "field");
+		FIELD_FRAME = param<std::string>("field_frame", "base_link");
+		ODOM_FRAME = param<std::string>("odom_frame", "odom");
+		ROBOT_FRAME = param<std::string>("robot_frame", "base_link");
 		// setup
-		nh_.param<double>("broadcast_period", BROADCAST_PERIOD, 0.001);
-		nh_.param<bool>("odom_tf_broadcast", ODOM_TF, true);
+		BROADCAST_PERIOD = param<double>("broadcast_period", 0.001);
+		ODOM_TF = param<bool>("odom_tf_broadcast", true);
 		// 点群パラメータ
-		nh_.param<int>("min_point_cloud_size", MIN_CLOUD_SIZE, 100);
-		nh_.param<double>("voxelgrid_size", VOXELGRID_SIZE, 0.06);
+		MIN_CLOUD_SIZE = param<int>("min_point_cloud_size", 100);
+		VOXELGRID_SIZE = param<double>("voxelgrid_size", 0.06);
 		// scan matchingパラメータ
-		nh_.param<double>("target_voxelgrid_size", TARGET_VOXELGRID_SIZE, 0.5);
-		nh_.param<double>("target_update_min_score", TARGET_UPDATE_MIN_SCORE, 0.0005);
-		nh_.param<double>("min_score_limit", MIN_SCORE_LIMIT, 0.01);
+		TARGET_VOXELGRID_SIZE = param<double>("target_voxelgrid_size", 0.1);
+		TARGET_UPDATE_MIN_SCORE = param<double>("target_update_min_score", 0.0005);
+		MIN_SCORE_LIMIT = param<double>("min_score_limit", 0.01);
 		// kalman filter
-		double POS_Q, RPY_Q, POS_R, RPY_R;
-		nh_.param<double>("pos_Q", POS_Q, 0.2);
-		nh_.param<double>("rpy_Q", RPY_Q, 0.2);
-		nh_.param<double>("pos_R", POS_R, 0.7);
-		nh_.param<double>("rpy_R", RPY_R, 0.7);
+		double POS_Q = param<double>("pos_Q", 0.2);
+		double RPY_Q = param<double>("rpy_Q", 0.2);
+		double POS_R = param<double>("pos_R", 0.7);
+		double RPY_R = param<double>("rpy_R", 0.7);
 		// grid point observe
-		nh_.param<double>("grid_width", gpo_param.grid_width, 0.01);
-		nh_.param<double>("min_gain_position", gpo_param.min_gain_position, 0.1);
-		nh_.param<double>("min_gain_orientation", gpo_param.min_gain_orientation, 0.03);
-		nh_.param<double>("max_gain_position", gpo_param.max_gain_position, 0.4);
-		nh_.param<double>("max_gain_orientation", gpo_param.max_gain_orientation, 0.1);
+		grid_point_observe_parameter_t gpo_param;
+		gpo_param.grid_width = param<double>("grid_width", 0.01);
+		gpo_param.min_gain_position = param<double>("min_gain_position", 0.1);
+		gpo_param.min_gain_orientation = param<double>("min_gain_orientation", 0.03);
+		gpo_param.max_gain_position = param<double>("max_gain_position", 0.4);
+		gpo_param.max_gain_orientation = param<double>("max_gain_orientation", 0.1);
 		// robotパラメータ
-		nh_.param<double>("min_velocity", MIN_VEL, 0.01);
-		nh_.param<double>("min_angular", MIN_ANGULAR, 0.01);
-		nh_.param<double>("max_velocity", MAX_VEL, 5.0);
-		nh_.param<double>("max_angular", gpo_param.max_angular, 5.0);
+		MIN_VEL = param<double>("min_velocity", 0.01);
+		MIN_ANGULAR = param<double>("min_angular", 0.01);
+		MAX_VEL = param<double>("max_velocity", 5.0);
+		gpo_param.max_angular = param<double>("max_angular", 5.0);
 		// 外れ値
-		nh_.param<double>("outlier_distance", OUTLIER_DIST, 5.0);
+		OUTLIER_DIST = param<double>("outlier_distance", 5.0);
 		// init
 		gpo_param.max_velocity = MAX_VEL;
 		gpo_.set_params(gpo_param);
@@ -118,82 +109,25 @@ public:
 		rpy_klf_.Q = q_vec.asDiagonal();
 		r_vec << RPY_R, RPY_R, RPY_R;
 		rpy_klf_.R = r_vec.asDiagonal();
-		// timer
-		main_timer_ = nh_.createTimer(ros::Duration(BROADCAST_PERIOD), &ICPScanMatcher::MainTimerCallback, this);
 		// publisher
-		odom_pub_ = nh_.advertise<nav_msgs::Odometry>("/mercury_mega/odom", 1, true);
-		laser_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/mercury_mega/laser_pose", 1, true);
-		debug_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("debug_points", 1, true);
-		now_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("now_points", 1, true);
-		old_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("old_points", 1, true);
-		icp_final_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("icp_final_points", 1, true);
+		laser_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("icp_scan_matcher/laser_pose", rclcpp::QoS(10).best_effort());
+		debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("icp_scan_matcher/debug_points", rclcpp::QoS(10));
+		now_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("icp_scan_matcher/now_points", rclcpp::QoS(10));
+		old_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("icp_scan_matcher/old_points", rclcpp::QoS(10));
+		icp_final_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("icp_scan_matcher/icp_final_points", rclcpp::QoS(10));
 		// subscriber
-		odom_sub_ = nh_.subscribe(ODOM_TOPIC, 1, &ICPScanMatcher::OdomCallback, this);
-		cloud_sub_ = nh_.subscribe(CLOUD_TOPIC, 1, &ICPScanMatcher::PointCloudCallback, this);
-		//  tf2
-		tf_listener_ =
-				std::make_shared<tf2_ros::TransformListener>(tf_buffer_);
-	}
-
-	void update_target_cloud(double score, const pcl::PointCloud<pcl::PointXYZ> &input_cloud)
-	{
-		if (!update_cloud_)
-		{
-			if (score < TARGET_UPDATE_MIN_SCORE)
-			{
-				old_cloud_ += input_cloud;
-				//  Down sampling
-				old_cloud_ = voxelgrid_filter(old_cloud_, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE);
-				update_cloud_ = true;
-			}
-		}
+		odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(ODOM_TOPIC, rclcpp::QoS(10), std::bind(&ICPScanMatcher::odometry_callback, this, std::placeholders::_1));
+		cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(CLOUD_TOPIC, rclcpp::QoS(10).best_effort(), std::bind(&ICPScanMatcher::pointcloud_callback, this, std::placeholders::_1));
+		// timer
+		main_timer_ = this->create_wall_timer(1ms, [&]() {});
 	}
 
 	// callback
-	void OdomCallback(const nav_msgs::Odometry::ConstPtr &msg)
+	void odometry_callback(const nav_msgs::msg::Odometry::ConstPtr msg)
 	{
-		// #if defined(DEBUG_OUTPUT)
-		// 		std::cout << "get odom" << std::endl;
-		// #endif
-		nav_msgs::Odometry odom;
-		odom = *msg;
-		odom.header = make_header(ODOM_FRAME, ros::Time::now());
-		odom_pub_.publish(odom);
-		odom_linear_.x = odom.twist.twist.linear.x;
-		odom_linear_.y = odom.twist.twist.linear.y;
-		odom_linear_.z = odom.twist.twist.linear.z;
-		odom_angular_.x = odom.twist.twist.angular.x;
-		odom_angular_.y = odom.twist.twist.angular.y;
-		odom_angular_.z = odom.twist.twist.angular.z;
-		odom_pose_.position.x = odom.pose.pose.position.x;
-		odom_pose_.position.y = odom.pose.pose.position.y;
-		odom_pose_.position.z = odom.pose.pose.position.z;
-		odom_pose_.orientation.x = odom.pose.pose.orientation.x;
-		odom_pose_.orientation.y = odom.pose.pose.orientation.y;
-		odom_pose_.orientation.z = odom.pose.pose.orientation.z;
-		odom_pose_.orientation.w = odom.pose.pose.orientation.w;
-		if (initialization_)
-		{
-			init_odom_pose_ = odom_pose_;
-			Eigen::Vector3d x0;
-			x0 << 0.0, 0.0, 0.0;
-			Eigen::Matrix<double, 3, 3> p0 = Eigen::Matrix<double, 3, 3>::Zero();
-			pos_klf_.reset(x0, p0);
-			rpy_klf_.reset(x0, p0);
-			gpo_.set_initial_position({0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
-			initialization_ = false;
-		}
-		Vector3d init_rpy = init_odom_pose_.orientation.get_rpy();
-		Vector3d odom_rpy = odom_pose_.orientation.get_rpy();
-		Vector3d rpy = odom_rpy - init_rpy;
-		odom_pose_.position -= init_odom_pose_.position;
-		odom_pose_.position.rotate(-init_rpy);
-		odom_pose_.orientation.set_rpy(rpy.x, rpy.y, rpy.z);
-		// grid point observe
-		gpo_.set_deadreckoning(odom_pose_.position, rpy, odom_linear_, odom_angular_);
 	}
 
-	void PointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
+	void pointcloud_callback(const sensor_msgs::msg::PointCloud2::ConstPtr msg)
 	{
 		static uint64_t num = 1;
 		static long double sum = 0.;
@@ -202,12 +136,12 @@ public:
 		std::cout << "----------------------------------------------------------------------------------" << std::endl;
 		std::cout << "get cloud" << std::endl;
 #endif
-		sensor_msgs::PointCloud2 get_cloud;
+		sensor_msgs::msg::PointCloud2 get_cloud;
 		get_cloud = *msg;
-		std::string CAMERA_FRAME = "mercury/camera_link";
-		get_cloud.header.frame_id = CAMERA_FRAME;
-		debug_cloud_pub_.publish(get_cloud);
-		std::optional<sensor_msgs::PointCloud2> trans_cloud = transform_pointcloud2(tf_buffer_, FIELD_FRAME, get_cloud);
+		// std::string CAMERA_FRAME = "mercury/camera_link";
+		// get_cloud.header.frame_id = CAMERA_FRAME;
+		debug_cloud_pub_->publish(get_cloud);
+		std::optional<sensor_msgs::msg::PointCloud2> trans_cloud = transform_pointcloud2(tf_buffer_, FIELD_FRAME, get_cloud);
 		if (trans_cloud)
 		{
 			// msg convert
@@ -217,7 +151,7 @@ public:
 			{
 				//  Down sampling
 				now_cloud = voxelgrid_filter(now_cloud, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
-				now_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, now_cloud));
+				now_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), now_cloud));
 				if (initialization_)
 				{
 #if defined(DEBUG_OUTPUT)
@@ -232,6 +166,7 @@ public:
 					sum = 0.;
 					ssum = 0.;
 					num = 1;
+					initialization_ = false;
 				}
 				else if (!old_cloud_.empty())
 				{
@@ -244,7 +179,7 @@ public:
 						std::vector<int> mapping1, mapping2;
 						pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping1);
 						pcl::removeNaNFromPointCloud(old_cloud_, old_cloud_, mapping2);
-						old_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, old_cloud_));
+						old_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), old_cloud_));
 
 #if defined(POINT_CLOUD_CHECH)
 						// nan値がないことのチェック
@@ -268,7 +203,7 @@ public:
 						if (result)
 						{
 							auto &[score, tmat, final_cloud] = result.value();
-							icp_final_cloud_pub_.publish(make_ros_pointcloud2(FIELD_FRAME, final_cloud));
+							icp_final_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), final_cloud));
 #if defined(DEBUG_OUTPUT)
 							std::cout << "ICP has converged, score is " << score << std::endl;
 #endif
@@ -314,11 +249,11 @@ public:
 									ssum += delta_dist * delta_dist;
 									num++;
 
-									double diff_t = (double)(ros::Time::now() - get_cloud.header.stamp).toSec();
-									Vector3d corr_pos = {odom_linear_.x * diff_t, odom_linear_.y * diff_t, odom_linear_.z * diff_t};
-									Vector3d corr_rpy = {odom_angular_.x * diff_t, odom_angular_.y * diff_t, odom_angular_.z * diff_t};
-									diff_pos += corr_pos;
-									diff_rpy += corr_rpy;
+									// double diff_t = (double)(rclcpp::Clock().now() - get_cloud.header.stamp).seconds();
+									// Vector3d corr_pos = {odom_linear_.x * diff_t, odom_linear_.y * diff_t, odom_linear_.z * diff_t};
+									// Vector3d corr_rpy = {odom_angular_.x * diff_t, odom_angular_.y * diff_t, odom_angular_.z * diff_t};
+									// diff_pos += corr_pos;
+									// diff_rpy += corr_rpy;
 
 									rpy += diff_rpy;
 									laser_pose_.position += diff_pos;
@@ -328,9 +263,9 @@ public:
 									std::cout << "norm pos:" << diff_pos.norm() << "|rpy:" << diff_rpy.norm() << std::endl;
 #endif
 									// filter
-									static auto pre_time = ros::Time::now();
-									double dt = (ros::Time::now() - pre_time).toSec();
-									pre_time = ros::Time::now();
+									static rclcpp::Time pre_time = rclcpp::Clock().now();
+									double dt = (rclcpp::Clock().now() - pre_time).seconds();
+									pre_time = rclcpp::Clock().now();
 									if (approx_zero(dt))
 									{
 										Eigen::Vector3d g_vec;
@@ -353,12 +288,13 @@ public:
 									// update point cloud
 									double velocity = odom_linear_.norm(); // 並進速度の大きさ//std::hypot(odom_linear_.x, odom_linear_.y, odom_linear_.z);
 									double angular = odom_angular_.norm(); // 回転速度の大きさ//std::hypot(odom_angular_.x, odom_angular_.y, odom_angular_.z);
-									if (angular < MIN_ANGULAR)						 // 並進移動時のみ更新する
+									if (angular < MIN_ANGULAR)			   // 並進移動時のみ更新する
 									{
 										if (velocity > MIN_VEL)
 											update_cloud_ = false;
 										if (velocity < MAX_VEL)
 											update_target_cloud(score, final_cloud);
+										update_cloud_ = false; //
 									}
 									else
 										update_cloud_ = false;
@@ -371,71 +307,22 @@ public:
 							}
 						}
 						else
-							ROS_ERROR("ICP has not converged.");
+							RCLCPP_ERROR(this->get_logger(), "ICP has not converged.");
 					}
 				}
 				else
 					old_cloud_ = now_cloud;
 			}
 			else
-				ROS_ERROR("now_cloud empty");
+				RCLCPP_ERROR(this->get_logger(), "now_cloud empty");
 		}
 		else
-			ROS_ERROR("transform error");
+			RCLCPP_ERROR(this->get_logger(), "transform error");
 		// debug output
-		// laser_pose_msg_.header = make_header(ODOM_FRAME, ros::Time::now());
-		laser_pose_msg_.header = make_header(FIELD_FRAME, ros::Time::now());
+		// laser_pose_msg_.header = make_header(ODOM_FRAME, rclcpp::Clock().now());
+		laser_pose_msg_.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
 		laser_pose_msg_.pose = make_geometry_pose(laser_pose_);
-		laser_pose_pub_.publish(laser_pose_msg_);
-	}
-
-	void MainTimerCallback(const ros::TimerEvent &e)
-	{
-		// grid point observe
-		const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
-		estimate_pose_.position = estimate_position;
-		estimate_pose_.orientation.set_rpy(estimate_orientation.x, estimate_orientation.y, estimate_orientation.z);
-		// field -> odom tf
-		geometry_msgs::TransformStamped transformstamped;
-		if (ODOM_TF)
-		{
-			transformstamped.header = make_header(FIELD_FRAME, ros::Time::now());
-			transformstamped.child_frame_id = ODOM_FRAME;
-			transformstamped.transform.translation.x = odom_pose_.position.x;
-			transformstamped.transform.translation.y = odom_pose_.position.y;
-			transformstamped.transform.translation.z = odom_pose_.position.z;
-			transformstamped.transform.rotation.x = odom_pose_.orientation.x;
-			transformstamped.transform.rotation.y = odom_pose_.orientation.y;
-			transformstamped.transform.rotation.z = odom_pose_.orientation.z;
-			transformstamped.transform.rotation.w = odom_pose_.orientation.w;
-			br_.sendTransform(transformstamped);
-		}
-		// odom -> base_link tf
-		// transformstamped.header = make_header(ODOM_FRAME, ros::Time::now());
-		transformstamped.header = make_header(FIELD_FRAME, ros::Time::now());
-		transformstamped.child_frame_id = ROBOT_FRAME;
-		if (estimate_pose_.position.has_nan() || estimate_pose_.orientation.has_nan())
-		{
-			estimate_pose_.position = {0.0, 0.0, 0.0};
-			estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
-		}
-		transformstamped.transform.translation.x = estimate_pose_.position.x;
-		transformstamped.transform.translation.y = estimate_pose_.position.y;
-		transformstamped.transform.translation.z = estimate_pose_.position.z;
-		transformstamped.transform.rotation.x = estimate_pose_.orientation.x;
-		transformstamped.transform.rotation.y = estimate_pose_.orientation.y;
-		transformstamped.transform.rotation.z = estimate_pose_.orientation.z;
-		transformstamped.transform.rotation.w = estimate_pose_.orientation.w;
-
-		// transformstamped.transform.translation.x = laser_pose_.position.x;
-		// transformstamped.transform.translation.y = laser_pose_.position.y;
-		// transformstamped.transform.translation.z = laser_pose_.position.z;
-		// transformstamped.transform.rotation.x = laser_pose_.orientation.x;
-		// transformstamped.transform.rotation.y = laser_pose_.orientation.y;
-		// transformstamped.transform.rotation.z = laser_pose_.orientation.z;
-		// transformstamped.transform.rotation.w = laser_pose_.orientation.w;
-
-		br_.sendTransform(transformstamped);
+		laser_pose_pub_->publish(laser_pose_msg_);
 	}
 
 private:
@@ -458,28 +345,24 @@ private:
 	bool ODOM_TF;
 	// マルチスレッド関連
 	inline static std::mutex mtx;
-	// node handle
-	ros::NodeHandle nh_;
+	// tf
+	tf2_ros::Buffer tf_buffer_;
+	tf2_ros::TransformListener listener_;
 	// timer
-	ros::Timer main_timer_;
+	rclcpp::TimerBase::SharedPtr main_timer_;
 	// subscriber
-	ros::Subscriber odom_sub_;
-	ros::Subscriber cloud_sub_;
+	rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+	rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
 	// publisher
-	ros::Publisher odom_pub_;
-	ros::Publisher laser_pose_pub_;
-	ros::Publisher debug_cloud_pub_;
-	ros::Publisher now_cloud_pub_;
-	ros::Publisher old_cloud_pub_;
-	ros::Publisher icp_final_cloud_pub_;
+	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr laser_pose_pub_;
+	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
+	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr now_cloud_pub_;
+	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr old_cloud_pub_;
+	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr icp_final_cloud_pub_;
 	// filter
 	KalmanFilter<double, 3, 3, 3> pos_klf_;
 	KalmanFilter<double, 3, 3, 3> rpy_klf_;
 	GridPointObserver gpo_;
-	// tf
-	tf2_ros::TransformBroadcaster br_;
-	tf2_ros::Buffer tf_buffer_;
-	std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 	// cloud
 	pcl::PointCloud<pcl::PointXYZ> old_cloud_;
 	// pose
@@ -487,11 +370,27 @@ private:
 	Pose3d odom_pose_;
 	Pose3d init_odom_pose_;
 	Pose3d estimate_pose_;
-	geometry_msgs::PoseStamped laser_pose_msg_;
+	geometry_msgs::msg::PoseStamped laser_pose_msg_;
 
 	Vector3d old_diff_pos_;
 	// Vector3d old_diff_rpy_;
 	// vel
 	Vector3d odom_linear_;
 	Vector3d odom_angular_;
+
+	// function
+
+	void update_target_cloud(double score, const pcl::PointCloud<pcl::PointXYZ> &input_cloud)
+	{
+		if (!update_cloud_)
+		{
+			if (score < TARGET_UPDATE_MIN_SCORE)
+			{
+				old_cloud_ += input_cloud;
+				//  Down sampling
+				old_cloud_ = voxelgrid_filter(old_cloud_, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE, TARGET_VOXELGRID_SIZE);
+				update_cloud_ = true;
+			}
+		}
+	}
 };
