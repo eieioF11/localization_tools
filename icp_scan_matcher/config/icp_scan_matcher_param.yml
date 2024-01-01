@@ -1,0 +1,39 @@
+/icp_scan_matcher_node:
+  ros__parameters:
+    icp_scan_matcher:
+      topic_name:
+        cloud: "/camera/depth_registered/points"
+        odom: "/odom"
+        imu: "/wit_ros/imu_pose"
+      tf_frame:
+        map_frame: "map"
+        odom_frame: "odom"
+        robot_frame: "base_link"
+      broadcast_period: 0.001
+      odom_tf_broadcast: true
+      # 点群パラメータ
+      min_point_cloud_size: 100
+      filter:
+        voxelgrid_size: 0.06
+        radius_search: 0.02          #radiusoutlierフィルタ
+        min_neighbors_in_radius: 5.0 #radiusoutlierフィルタ
+        target_voxelgrid_size: 0.06
+        target_update_min_score: 0.0005
+      min_score_limit: 0.01
+      #カルマンフィルタ設定
+      kalman_filter:
+        Q: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]   #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+        R: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]   #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+      #grid point observe
+      gpo:
+        grid_width: 0.01
+        min_gain_position: 0.1
+        min_gain_orientation: 0.03
+        max_gain_position: 0.4
+        max_gain_orientation: 0.1
+      robot:
+        min_velocity: 0.01
+        min_angular: 0.01
+        max_velocity: 5.0
+        max_angular: 5.0
+      outlier_distance: 5.0

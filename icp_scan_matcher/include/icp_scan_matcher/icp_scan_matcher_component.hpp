@@ -48,6 +48,7 @@ public:
 		// get param
 		std::string CLOUD_TOPIC = param<std::string>("icp_scan_matcher.topic_name.cloud", "/camera/depth_registered/points");
 		std::string ODOM_TOPIC = param<std::string>("icp_scan_matcher.topic_name.odom", "/odom");
+		std::string IMU_TOPIC = param<std::string>("icp_scan_matcher.topic_name.imu", "/wit_ros/imu_pose");
 		// frame
 		FIELD_FRAME = param<std::string>("icp_scan_matcher.tf_frame.map_frame", "map");
 		ODOM_FRAME = param<std::string>("icp_scan_matcher.tf_frame.odom_frame", "odom");
@@ -57,21 +58,24 @@ public:
 		ODOM_TF = param<bool>("icp_scan_matcher.odom_tf_broadcast", true);
 		// 点群パラメータ
 		MIN_CLOUD_SIZE = param<int>("icp_scan_matcher.min_point_cloud_size", 100);
-		VOXELGRID_SIZE = param<double>("icp_scan_matcher.voxelgrid_size", 0.06);
+		VOXELGRID_SIZE = param<double>("icp_scan_matcher.filter.voxelgrid_size", 0.04);
+		// radiusoutlierフィルタ
+		RADIUS_SEARCH = param<double>("icp_scan_matcher.filter.radius_search", 0.02);
+		MIN_NEIGHBORS_IN_RADIUS = param<double>("icp_scan_matcher.filter.min_neighbors_in_radius", 5.0);
 		// scan matchingパラメータ
-		TARGET_VOXELGRID_SIZE = param<double>("icp_scan_matcher.target_voxelgrid_size", 0.1);
-		TARGET_UPDATE_MIN_SCORE = param<double>("icp_scan_matcher.target_update_min_score", 0.0005);
+		TARGET_VOXELGRID_SIZE = param<double>("icp_scan_matcher.filter.target_voxelgrid_size", 0.04);
+		TARGET_UPDATE_MIN_SCORE = param<double>("icp_scan_matcher.filter.target_update_min_score", 0.0005);
 		MIN_SCORE_LIMIT = param<double>("icp_scan_matcher.min_score_limit", 0.01);
 		// kalman filter
-		std::vector<double> K_Q = param<std::vector<double>>("icp_scan_matcher.kalman_filter.pos_Q", {0.2,0.2,0.2,0.2,0.2,0.2});
-		std::vector<double> K_R = param<std::vector<double>>("icp_scan_matcher.kalman_filter.pos_R", {0.7,0.7,0.7,0.7,0.7,0.7});
+		std::vector<double> K_Q = param<std::vector<double>>("icp_scan_matcher.kalman_filter.Q", {0.2, 0.2, 0.2, 0.2, 0.2, 0.2});
+		std::vector<double> K_R = param<std::vector<double>>("icp_scan_matcher.kalman_filter.R", {0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
 		// grid point observe
 		grid_point_observe_parameter_t gpo_param;
-		gpo_param.grid_width = param<double>("icp_scan_matcher.grid_width", 0.01);
-		gpo_param.min_gain_position = param<double>("icp_scan_matcher.min_gain_position", 0.1);
-		gpo_param.min_gain_orientation = param<double>("icp_scan_matcher.min_gain_orientation", 0.03);
-		gpo_param.max_gain_position = param<double>("icp_scan_matcher.max_gain_position", 0.4);
-		gpo_param.max_gain_orientation = param<double>("icp_scan_matcher.max_gain_orientation", 0.1);
+		gpo_param.grid_width = param<double>("icp_scan_matcher.gpo.grid_width", 0.01);
+		gpo_param.min_gain_position = param<double>("icp_scan_matcher.gpo.min_gain_position", 0.1);
+		gpo_param.min_gain_orientation = param<double>("icp_scan_matcher.gpo.min_gain_orientation", 0.03);
+		gpo_param.max_gain_position = param<double>("icp_scan_matcher.gpo.max_gain_position", 0.4);
+		gpo_param.max_gain_orientation = param<double>("icp_scan_matcher.gpo.max_gain_orientation", 0.1);
 		// robotパラメータ
 		MIN_VEL = param<double>("icp_scan_matcher.robot.min_velocity", 0.01);
 		MIN_ANGULAR = param<double>("icp_scan_matcher.robot.min_angular", 0.01);
@@ -80,6 +84,7 @@ public:
 		// 外れ値
 		OUTLIER_DIST = param<double>("icp_scan_matcher.outlier_distance", 5.0);
 		// init
+		get_imu_data_ = false;
 		gpo_param.max_velocity = MAX_VEL;
 		gpo_.set_params(gpo_param);
 		odom_pose_.position = laser_pose_.position = estimate_pose_.position = {0.0, 0.0, 0.0};
@@ -113,9 +118,11 @@ public:
 		icp_final_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("icp_scan_matcher/icp_final_points", rclcpp::QoS(10));
 		// subscriber
 		odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(ODOM_TOPIC, rclcpp::QoS(10), std::bind(&ICPScanMatcher::odometry_callback, this, std::placeholders::_1));
+		imu_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(IMU_TOPIC, rclcpp::QoS(10).best_effort(), std::bind(&ICPScanMatcher::imu_callback, this, std::placeholders::_1));
 		cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(CLOUD_TOPIC, rclcpp::QoS(10).best_effort(), std::bind(&ICPScanMatcher::pointcloud_callback, this, std::placeholders::_1));
 		// timer
-		main_timer_ = this->create_wall_timer(1ms, [&](){
+		main_timer_ = this->create_wall_timer(1ms, [&]()
+											  {
 			// grid point observe
 			const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
 			estimate_pose_.position = estimate_position;
@@ -140,13 +147,19 @@ public:
 			transform_stamped.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
 			transform_stamped.child_frame_id = ROBOT_FRAME;
 			transform_stamped.transform = make_geometry_transform(estimate_pose_);
-			broadcaster_.sendTransform(transform_stamped);
-			});
+			broadcaster_.sendTransform(transform_stamped); });
 	}
 
 	// callback
 	void odometry_callback(const nav_msgs::msg::Odometry::ConstPtr msg)
 	{
+	}
+
+	void imu_callback(const geometry_msgs::msg::PoseStamped::ConstPtr msg)
+	{
+		get_imu_data_ = true;
+		imu_pose_ = make_pose(msg->pose);
+		gpo_.set_deadreckoning({0.0, 0.0, 0.0}, imu_pose_.orientation.get_rpy(), {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
 	}
 
 	void pointcloud_callback(const sensor_msgs::msg::PointCloud2::ConstPtr msg)
@@ -160,9 +173,6 @@ public:
 #endif
 		sensor_msgs::msg::PointCloud2 get_cloud;
 		get_cloud = *msg;
-		// std::string CAMERA_FRAME = "mercury/camera_link";
-		// get_cloud.header.frame_id = CAMERA_FRAME;
-		debug_cloud_pub_->publish(get_cloud);
 		std::optional<sensor_msgs::msg::PointCloud2> trans_cloud = transform_pointcloud2(tf_buffer_, FIELD_FRAME, get_cloud);
 		if (trans_cloud)
 		{
@@ -171,38 +181,23 @@ public:
 			pcl::fromROSMsg(trans_cloud.value(), now_cloud);
 			if (!now_cloud.empty())
 			{
+				// nan値除去
+				std::vector<int> mapping;
+				pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping);
 				//  Down sampling
 				now_cloud = voxelgrid_filter(now_cloud, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
 				now_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), now_cloud));
-				if (initialization_)
-				{
+				// 外れ値除去
+				// now_cloud = radiusoutlier_filter(now_cloud, RADIUS_SEARCH, MIN_NEIGHBORS_IN_RADIUS);
+				debug_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), now_cloud));
 #if defined(DEBUG_OUTPUT)
-					std::cout << "Initialization" << std::endl;
-					std::cout << "now_cloud size:" << now_cloud.points.size() << "|old_cloud size:" << old_cloud_.points.size() << std::endl;
+				std::cout << "now_cloud size:" << now_cloud.points.size() << "|old_cloud size:" << old_cloud_.points.size() << std::endl;
 #endif
-					// nan値除去
-					std::vector<int> mapping;
-					pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping);
-					old_cloud_ = now_cloud;
-
-					sum = 0.;
-					ssum = 0.;
-					num = 1;
-					initialization_ = false;
-				}
-				else if (!old_cloud_.empty())
+				if (now_cloud.points.size() > MIN_CLOUD_SIZE)
 				{
-#if defined(DEBUG_OUTPUT)
-					std::cout << "now_cloud size:" << now_cloud.points.size() << "|old_cloud size:" << old_cloud_.points.size() << std::endl;
-#endif
-					if (now_cloud.points.size() > MIN_CLOUD_SIZE)
+					if (!old_cloud_.empty())
 					{
-						// nan値除去
-						std::vector<int> mapping1, mapping2;
-						pcl::removeNaNFromPointCloud(now_cloud, now_cloud, mapping1);
-						pcl::removeNaNFromPointCloud(old_cloud_, old_cloud_, mapping2);
 						old_cloud_pub_->publish(make_ros_pointcloud2(make_header(FIELD_FRAME, get_cloud.header.stamp), old_cloud_));
-
 						// ICP
 						const auto &result = iterative_closest_point(now_cloud, old_cloud_);
 						if (result)
@@ -289,17 +284,20 @@ public:
 									x = rpy_klf_.filtering(u, z);
 									laser_pose_.orientation.set_rpy(x(0), x(1), x(2));
 									// grid point observe
+#if defined(DEBUG_OUTPUT)
+									std::cout << "imu:" << imu_pose_.orientation.get_rpy() << std::endl;
+#endif
 									gpo_.set_starreckoning(laser_pose_.position, {x(0), x(1), x(2)});
 									// update point cloud
 									double velocity = odom_linear_.norm(); // 並進速度の大きさ//std::hypot(odom_linear_.x, odom_linear_.y, odom_linear_.z);
 									double angular = odom_angular_.norm(); // 回転速度の大きさ//std::hypot(odom_angular_.x, odom_angular_.y, odom_angular_.z);
 									if (angular < MIN_ANGULAR)			   // 並進移動時のみ更新する
 									{
+										update_cloud_ = false; //
 										if (velocity > MIN_VEL)
 											update_cloud_ = false;
 										if (velocity < MAX_VEL)
 											update_target_cloud(score, final_cloud);
-										update_cloud_ = false; //
 									}
 									else
 										update_cloud_ = false;
@@ -314,9 +312,9 @@ public:
 						else
 							RCLCPP_ERROR(this->get_logger(), "ICP has not converged.");
 					}
+					else
+						old_cloud_ = now_cloud;
 				}
-				else
-					old_cloud_ = now_cloud;
 			}
 			else
 				RCLCPP_ERROR(this->get_logger(), "now_cloud empty");
@@ -324,7 +322,6 @@ public:
 		else
 			RCLCPP_ERROR(this->get_logger(), "transform error");
 		// debug output
-		// laser_pose_msg_.header = make_header(ODOM_FRAME, rclcpp::Clock().now());
 		laser_pose_msg_.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
 		laser_pose_msg_.pose = make_geometry_pose(laser_pose_);
 		laser_pose_pub_->publish(laser_pose_msg_);
@@ -333,6 +330,7 @@ public:
 private:
 	bool initialization_;
 	bool update_cloud_;
+	bool get_imu_data_;
 	// param
 	std::string FIELD_FRAME;
 	std::string ROBOT_FRAME;
@@ -347,6 +345,8 @@ private:
 	double MIN_ANGULAR;
 	double MAX_VEL;
 	double OUTLIER_DIST;
+	double RADIUS_SEARCH;
+	double MIN_NEIGHBORS_IN_RADIUS;
 	bool ODOM_TF;
 	// マルチスレッド関連
 	inline static std::mutex mtx;
@@ -358,6 +358,7 @@ private:
 	rclcpp::TimerBase::SharedPtr main_timer_;
 	// subscriber
 	rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+	rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr imu_sub_;
 	rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
 	// publisher
 	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr laser_pose_pub_;
@@ -374,6 +375,7 @@ private:
 	// pose
 	Pose3d laser_pose_;
 	Pose3d odom_pose_;
+	Pose3d imu_pose_;
 	Pose3d init_odom_pose_;
 	Pose3d estimate_pose_;
 	geometry_msgs::msg::PoseStamped laser_pose_msg_;
