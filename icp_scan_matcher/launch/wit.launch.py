@@ -16,7 +16,7 @@ def generate_launch_description():
         launch.actions.DeclareLaunchArgument('frame_id',
                                             default_value="/imu_link"),
         launch.actions.DeclareLaunchArgument('publish_hz',
-                                            default_value="10.0"),
+                                            default_value="200.0"),
     ]
     wit_node = launch_ros.actions.Node(
         package="wit_node", executable="wit_node",
