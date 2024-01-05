@@ -70,7 +70,7 @@ public:
 		std::vector<double> K_Q = param<std::vector<double>>("icp_scan_matcher.kalman_filter.Q", {0.2, 0.2, 0.2, 0.2, 0.2, 0.2});
 		std::vector<double> K_R = param<std::vector<double>>("icp_scan_matcher.kalman_filter.R", {0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
 		// grid point observe
-		grid_point_observe_parameter_t gpo_param;
+		grid_point_observer_parameter_t gpo_param;
 		gpo_param.grid_width = param<double>("icp_scan_matcher.gpo.grid_width", 0.01);
 		gpo_param.min_gain_position = param<double>("icp_scan_matcher.gpo.min_gain_position", 0.1);
 		gpo_param.min_gain_orientation = param<double>("icp_scan_matcher.gpo.min_gain_orientation", 0.03);
@@ -143,6 +143,7 @@ public:
 				estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
 			}
 
+			estimate_pose_.orientation = imu_pose_.orientation;
 			geometry_msgs::msg::TransformStamped transform_stamped;
 			transform_stamped.header = make_header(FIELD_FRAME, rclcpp::Clock().now());
 			transform_stamped.child_frame_id = ROBOT_FRAME;
