@@ -2,8 +2,8 @@ grid_point_observer_node:
   ros__parameters:
     grid_point_observer:
       topic_name:
-        cloud: "ndt_scan_matcher/laser_pose"
-        laser_pos: "/odom"
+        laser_pos: "ndt_scan_matcher/laser_pose"
+        odom: "/odom"
         imu: "/wit_ros/imu_pose"
         estimate_pose: "grid_point_observer/estimate_pose"
         estimate_twist: "grid_point_observer/estimate_twist"
@@ -17,9 +17,9 @@ grid_point_observer_node:
       gpo:
         grid_width: 0.01
         min_gain_position: 0.1
+        max_gain_position: 0.5
         min_gain_orientation: 0.03
-        max_gain_position: 0.4
-        max_gain_orientation: 0.1
+        max_gain_orientation: 0.2
       robot:
         min_velocity: 0.01
         min_angular: 0.01

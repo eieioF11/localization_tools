@@ -56,9 +56,6 @@ public:
 		// setup
 		BROADCAST_PERIOD = param<double>("grid_point_observer.broadcast_period", 0.001);
 		ODOM_TF = param<bool>("grid_point_observer.odom_tf_broadcast", true);
-		// kalman filter
-		std::vector<double> K_Q = param<std::vector<double>>("grid_point_observer.kalman_filter.Q", {0.2, 0.2, 0.2, 0.2, 0.2, 0.2});
-		std::vector<double> K_R = param<std::vector<double>>("grid_point_observer.kalman_filter.R", {0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
 		// grid_point_observer
 		grid_point_observer_parameter_t gpo_param;
 		gpo_param.grid_width = param<double>("grid_point_observer.gpo.grid_width", 0.01);
@@ -90,6 +87,7 @@ public:
 			const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
 			estimate_pose_.position = estimate_position;
 			estimate_pose_.orientation.set_rpy(estimate_orientation.x, estimate_orientation.y, estimate_orientation.z);
+			// estimate_pose_.orientation = imu_pose_.orientation;//
 			estimate_twist_.linear = odom_twist_.linear.get_rotated(estimate_orientation);
 			estimate_twist_.angular = odom_twist_.angular;
 			// map -> odom tf
@@ -108,7 +106,6 @@ public:
 				estimate_pose_.orientation = {0.0, 0.0, 0.0, 1.0};
 			}
 
-			// estimate_pose_.orientation = imu_pose_.orientation;
 			geometry_msgs::msg::PoseStamped estimate_pose_msg;
 			estimate_pose_msg.header = make_header(MAP_FRAME, rclcpp::Clock().now());
 			estimate_pose_msg.pose = make_geometry_pose(estimate_pose_);
