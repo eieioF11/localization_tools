@@ -65,29 +65,34 @@ public:
 		ndt_param_.max_iterations = param<double>("ndt_scan_matcher.ndt.max_iterations", 100.0);
 		MIN_SCORE_LIMIT = param<double>("ndt_scan_matcher.ndt.min_score_limit", 0.0001);
 		// kalman filter
-		std::vector<double> K_Q = param<std::vector<double>>("ndt_scan_matcher.kalman_filter.Q", {0.2, 0.2, 0.2, 0.2, 0.2, 0.2});
-		std::vector<double> K_R = param<std::vector<double>>("ndt_scan_matcher.kalman_filter.R", {0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
+		use_kalmanfilter_ = param<bool>("ndt_scan_matcher.kalman_filter.use", true);
+		if (use_kalmanfilter_)
+		{
+			RCLCPP_INFO(this->get_logger(), "use kalman filter");
+			std::vector<double> K_Q = param<std::vector<double>>("ndt_scan_matcher.kalman_filter.Q", {0.2, 0.2, 0.2, 0.2, 0.2, 0.2});
+			std::vector<double> K_R = param<std::vector<double>>("ndt_scan_matcher.kalman_filter.R", {0.7, 0.7, 0.7, 0.7, 0.7, 0.7});
+			pos_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
+			Eigen::Vector3d g_vec, q_vec, r_vec;
+			g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
+			pos_klf_.G = g_vec.asDiagonal();
+			pos_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
+			q_vec << K_Q[0], K_Q[1], K_Q[2];
+			pos_klf_.Q = q_vec.asDiagonal();
+			r_vec << K_R[0], K_R[1], K_R[2];
+			pos_klf_.R = r_vec.asDiagonal();
+
+			rpy_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
+			g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
+			rpy_klf_.G = g_vec.asDiagonal();
+			rpy_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
+			q_vec << K_Q[3], K_Q[4], K_Q[5];
+			rpy_klf_.Q = q_vec.asDiagonal();
+			r_vec << K_R[3], K_R[4], K_R[5];
+			rpy_klf_.R = r_vec.asDiagonal();
+		}
 		// init
 		laser_pose_msg_.pose.orientation.w = 1.0;
 		initialization_ = true;
-		pos_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
-		Eigen::Vector3d g_vec, q_vec, r_vec;
-		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
-		pos_klf_.G = g_vec.asDiagonal();
-		pos_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
-		q_vec << K_Q[0], K_Q[1], K_Q[2];
-		pos_klf_.Q = q_vec.asDiagonal();
-		r_vec << K_R[0], K_R[1], K_R[2];
-		pos_klf_.R = r_vec.asDiagonal();
-
-		rpy_klf_.F = Eigen::Vector3d::Ones().asDiagonal();
-		g_vec << BROADCAST_PERIOD, BROADCAST_PERIOD, BROADCAST_PERIOD;
-		rpy_klf_.G = g_vec.asDiagonal();
-		rpy_klf_.H = Eigen::Vector3d::Ones().asDiagonal();
-		q_vec << K_Q[3], K_Q[4], K_Q[5];
-		rpy_klf_.Q = q_vec.asDiagonal();
-		r_vec << K_R[3], K_R[4], K_R[5];
-		rpy_klf_.R = r_vec.asDiagonal();
 		// publisher
 		laser_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("ndt_scan_matcher/laser_pose", rclcpp::QoS(10).best_effort());
 		debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("ndt_scan_matcher/debug_points", rclcpp::QoS(10));
@@ -157,10 +162,9 @@ public:
 		}
 		old_cloud_pub_->publish(make_ros_pointcloud2(make_header(MAP_FRAME, get_cloud.header.stamp), old_cloud_));
 		// NDT
-		Pose3d init_pose;
-		init_pose.position = -estimate_pose_.position;
-		const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_pose);
-		// const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, estimate_pose_);
+		Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(estimate_pose_));
+		// const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
+		const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
 		if (!result)
 		{
 			RCLCPP_ERROR(this->get_logger(), "NDT has not converged.");
@@ -172,40 +176,44 @@ public:
 		std::cout << "NDT has converged, score is " << score << std::endl;
 #endif
 		laser_pose_ = get_pose(tmat);
-		Vector3d rpy = laser_pose_.orientation.get_rpy();
-		// filter
 		static rclcpp::Time pre_time = rclcpp::Clock().now();
 		double dt = (rclcpp::Clock().now() - pre_time).seconds();
 		pre_time = rclcpp::Clock().now();
-		if (approx_zero(dt))
-		{
-			Eigen::Vector3d g_vec;
-			g_vec << dt, dt, dt;
-			pos_klf_.G = g_vec.asDiagonal();
-			rpy_klf_.G = g_vec.asDiagonal();
-		}
-		Eigen::Vector3d u, z;
-		u << estimate_twist_.linear.x, estimate_twist_.linear.y, estimate_twist_.linear.z;
-		z << laser_pose_.position.x, laser_pose_.position.y, laser_pose_.position.z;
-		auto x = pos_klf_.filtering(u, z);
-		laser_pose_.position = {x(0), x(1), x(2)};
-
-		u << estimate_twist_.angular.x, estimate_twist_.angular.y, estimate_twist_.angular.z;
-		z << rpy.x, rpy.y, rpy.z;
-		x = rpy_klf_.filtering(u, z);
-		laser_pose_.orientation.set_rpy(x(0), x(1), x(2));
-		// publish
-		laser_pose_msg_.header = make_header(MAP_FRAME, rclcpp::Clock().now());
-		laser_pose_msg_.pose = make_geometry_pose(laser_pose_);
-		laser_pose_pub_->publish(laser_pose_msg_);
-		// update point cloud
-#if defined(DEBUG_OUTPUT)
-		std::cout << "laser pose" << std::endl;
-		std::cout << "pos:" << laser_pose_.position << "|rpy" << rpy << std::endl;
-		std::cout << "quaternion:" << laser_pose_.orientation << std::endl;
-#endif
 		if (score < MIN_SCORE_LIMIT)
 		{
+			if (use_kalmanfilter_) // filter
+			{
+#if defined(DEBUG_OUTPUT)
+				std::cout << "calc kalmanfilter" << std::endl;
+#endif
+				Vector3d rpy = laser_pose_.orientation.get_rpy();
+				if (approx_zero(dt))
+				{
+					Eigen::Vector3d g_vec;
+					g_vec << dt, dt, dt;
+					pos_klf_.G = g_vec.asDiagonal();
+					rpy_klf_.G = g_vec.asDiagonal();
+				}
+				Eigen::Vector3d u, z;
+				u << estimate_twist_.linear.x, estimate_twist_.linear.y, estimate_twist_.linear.z;
+				z << laser_pose_.position.x, laser_pose_.position.y, laser_pose_.position.z;
+				auto x = pos_klf_.filtering(u, z);
+				laser_pose_.position = {x(0), x(1), x(2)};
+
+				u << estimate_twist_.angular.x, estimate_twist_.angular.y, estimate_twist_.angular.z;
+				z << rpy.x, rpy.y, rpy.z;
+				x = rpy_klf_.filtering(u, z);
+				laser_pose_.orientation.set_rpy(x(0), x(1), x(2));
+			}
+			// publish
+			laser_pose_msg_.header = make_header(MAP_FRAME, rclcpp::Clock().now());
+			laser_pose_msg_.pose = make_geometry_pose(laser_pose_);
+			laser_pose_pub_->publish(laser_pose_msg_);
+			// update point cloud
+#if defined(DEBUG_OUTPUT)
+			std::cout << "laser pose:" << std::endl;
+			std::cout << laser_pose_ << std::endl;
+#endif
 			old_cloud_ += final_cloud;
 			old_cloud_ = voxelgrid_filter(old_cloud_, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
 		}
@@ -215,6 +223,7 @@ public:
 
 private:
 	bool initialization_;
+	bool use_kalmanfilter_;
 	// param
 	std::string MAP_FRAME;
 	std::string ROBOT_FRAME;
@@ -253,4 +262,13 @@ private:
 	geometry_msgs::msg::PoseStamped laser_pose_msg_;
 	// vel
 	Twistd estimate_twist_;
+
+	// function
+	Eigen::Matrix4f get_transformation(const geometry_msgs::msg::Pose &pose)
+	{
+		Eigen::Affine3d affine;
+		tf2::fromMsg(pose, affine);
+		Eigen::Matrix4f trans = affine.matrix().cast<float>();
+		return trans;
+	}
 };

@@ -64,15 +64,24 @@ def generate_launch_description():
         parameters=[os.path.join(share_dir, "config", "ndt_scan_matcher_param.yaml")],
         respawn=True,
     )
-    gpo_node = launch_ros.actions.Node(
-        package='grid_point_observer',
-        executable='grid_point_observer',
+    # gpo_node = launch_ros.actions.Node(
+    #     package='grid_point_observer',
+    #     executable='grid_point_observer',
+    #     namespace='',
+    #     output="screen",
+    #     parameters=[os.path.join(get_package_share_directory('grid_point_observer'), "config", "grid_point_observer_param.yaml")],
+    #     respawn=True,
+    # )
+    tf_broadcaster_node = launch_ros.actions.Node(
+        package='tf_broadcaster',
+        executable='tf_broadcaster',
         namespace='',
         output="screen",
-        parameters=[os.path.join(get_package_share_directory('grid_point_observer'), "config", "grid_point_observer_param.yaml")],
+        parameters=[os.path.join(get_package_share_directory('tf_broadcaster'), "config", "tf_broadcaster_param.yaml")],
         respawn=True,
     )
     return launch.LaunchDescription(
         params +
-        [wit_node, base_link_to_imu_link_node,ndt_node,gpo_node, rviz2_node]
+        [wit_node, base_link_to_imu_link_node,ndt_node,tf_broadcaster_node, rviz2_node]
+        # [wit_node, base_link_to_imu_link_node,ndt_node,gpo_node, rviz2_node]
     )

@@ -4,8 +4,9 @@ ndt_scan_matcher_node:
       topic_name:
         cloud: "/camera/depth_registered/points"
         # estimate_pose: "grid_point_observer/estimate_pose"
-        estimate_pose: "ndt_scan_matcher/laser_pose"
-        estimate_twist: "grid_point_observer/estimate_twist"
+        # estimate_twist: "grid_point_observer/estimate_twist"
+        estimate_pose: "tf_broadcaster/estimate_pose"
+        estimate_twist: "tf_broadcaster/estimate_twist"
       tf_frame:
         map_frame: "map"
         odom_frame: "odom"
@@ -15,14 +16,17 @@ ndt_scan_matcher_node:
       # 点群パラメータ
       min_point_cloud_size: 100
       filter:
-        voxelgrid_size: 0.06
+        voxelgrid_size: 0.04 # 0.06
       ndt:
-        trans_epsilon: 0.00000001 #0.00000001
-        step_size: 0.06
-        resolution: 0.06
-        max_iterations: 1000.0
-        min_score_limit: 0.001
+        trans_epsilon: 0.0001 #0.00000001
+        step_size: 3.0 # 0.06
+        resolution: 0.5
+        max_iterations: 100.0
+        min_score_limit: 0.002
       #カルマンフィルタ設定
       kalman_filter:
-        Q: [0.2, 0.2, 0.2, 0.001, 0.001, 0.001] #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
-        R: [0.7, 0.7, 0.7, 0.2, 0.2, 0.2] #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+        use: true
+        Q: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2] #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+        R: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7] #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+        # Q: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001] #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+        # R: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01] #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]

@@ -1,0 +1,15 @@
+tf_broadcaster_node:
+  ros__parameters:
+    tf_broadcaster:
+      topic_name:
+        laser_pos: "ndt_scan_matcher/laser_pose"
+        odom: "/odom"
+        imu: "/wit_ros/imu_pose"
+        estimate_pose: "tf_broadcaster/estimate_pose"
+        estimate_twist: "tf_broadcaster/estimate_twist"
+      tf_frame:
+        map_frame: "map"
+        odom_frame: "odom"
+        robot_frame: "base_link"
+      broadcast_period: 0.001
+      odom_tf_broadcast: true
