@@ -87,7 +87,7 @@ public:
 			const auto &[estimate_position, estimate_orientation] = gpo_.update_estimate_pose();
 			estimate_pose_.position = estimate_position;
 			estimate_pose_.orientation.set_rpy(estimate_orientation.x, estimate_orientation.y, estimate_orientation.z);
-			// estimate_pose_.orientation = imu_pose_.orientation;//
+			// estimate_pose_.orientation=imu_pose_.orientation;
 			estimate_twist_.linear = odom_twist_.linear.get_rotated(estimate_orientation);
 			estimate_twist_.angular = odom_twist_.angular;
 			// map -> odom tf
@@ -133,6 +133,14 @@ public:
 	void imu_callback(const geometry_msgs::msg::PoseStamped::ConstPtr msg)
 	{
 		imu_pose_ = make_pose(msg->pose);
+		if(initialization_)
+		{
+			init_imu_pose_ = imu_pose_;
+			initialization_ = false;
+		}
+		Vector3d rpy= imu_pose_.orientation.get_rpy()-init_imu_pose_.orientation.get_rpy();
+		imu_pose_.orientation.set_rpy(rpy.x,rpy.y,rpy.z);
+		gpo_.set_deadreckoning(imu_pose_.position, imu_pose_.orientation.get_rpy(), odom_twist_);//てすと
 	}
 
 	void laser_pose_callback(const geometry_msgs::msg::PoseStamped::ConstPtr msg)
@@ -173,6 +181,7 @@ private:
 	// pose
 	Pose3d odom_pose_;
 	Pose3d imu_pose_;
+	Pose3d init_imu_pose_;
 	Pose3d estimate_pose_;
 	// vel
 	Twistd odom_twist_;
