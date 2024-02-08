@@ -152,7 +152,9 @@ public:
     }
     old_cloud_pub_->publish(make_ros_pointcloud2(make_header(MAP_FRAME, get_cloud.header.stamp), old_cloud_));
     // NDT
-    Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(estimate_pose_));
+    // Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(estimate_pose_));
+    // Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(Pose3d{}));
+    Eigen::Matrix4f init_guess = get_eigen_matrix4(laser_pose_);
     // const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
     const auto& result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
     if (!result) {
@@ -165,6 +167,10 @@ public:
     std::cout << "NDT has converged, score is " << score << std::endl;
 #endif
     laser_pose_                  = get_pose(tmat);
+    // Pose3d diff_pose = get_pose(tmat);
+    // laser_pose_.position                  = estimate_pose_.position+diff_pose.position;
+    // Vector3d rpy = estimate_pose_.orientation.get_rpy()+diff_pose.orientation.get_rpy();
+    // laser_pose_.orientation.set_rpy(rpy);
     static rclcpp::Time pre_time = rclcpp::Clock().now();
     double dt                    = (rclcpp::Clock().now() - pre_time).seconds();
     pre_time                     = rclcpp::Clock().now();
