@@ -1,45 +1,41 @@
 import os
 import sys
 from glob import glob
-import launch
-import launch_ros.actions
-from ament_index_python.packages import get_package_share_directory
-from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
+from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+import launch_ros.actions
+
+
 
 def generate_launch_description():
-    share_dir = get_package_share_directory('ndt_scan_matcher')
-    rviz_config_file = os.path.join(share_dir, 'rviz','default.rviz')
-    params = [
-        launch.actions.DeclareLaunchArgument('port',
-                                            default_value="/dev/ttyUSB0"),
-        launch.actions.DeclareLaunchArgument('baud_rate',
-                                            default_value="115200"),
-        launch.actions.DeclareLaunchArgument('frame_id',
-                                            default_value="/imu_link"),
-        launch.actions.DeclareLaunchArgument('publish_hz',
-                                            default_value="200.0"),
-    ]
-    wit_node = launch_ros.actions.Node(
-        package="wit_node", executable="wit_node",
-        parameters=[{
-            "port": launch.substitutions.LaunchConfiguration('port'),
-            "baud_rate": launch.substitutions.LaunchConfiguration('baud_rate'),
-            "frame_id": launch.substitutions.LaunchConfiguration('frame_id'),
-            "publish_hz": launch.substitutions.LaunchConfiguration('publish_hz')
-        }],
-    )
-    rviz2_node = launch_ros.actions.Node(
-        package='rviz2',
-        executable='rviz2',
-        arguments=['-d', rviz_config_file],
-    )
-    base_link_to_imu_link_node = launch_ros.actions.Node(
+    pkg_dir = get_package_share_directory('ndt_scan_matcher')
+    rviz_config_file = os.path.join(pkg_dir, 'rviz','test.rviz')
+    list = [
+        launch_ros.actions.SetParameter(name='use_sim_time', value=True),
+        # IncludeLaunchDescription(
+        #     PythonLaunchDescriptionSource(
+        #         [os.path.join(get_package_share_directory("data_logger"), "launch"), "/data_logger.launch.py"]
+        #     ),
+        # ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            arguments=['-d', rviz_config_file],
+            # parameters=[{'use_sim_time': True}]
+        ),
+        Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             arguments=[
                 "--x",
-                "0.0",
+                "-0.2",
                 "--y",
                 "0.0",
                 "--z",
@@ -53,35 +49,26 @@ def generate_launch_description():
                 "--frame-id",
                 "base_link",
                 "--child-frame-id",
-                "/imu_link",
+                "tugbot/scan_omni/scan_omni",
             ],
-    )
-    ndt_node = launch_ros.actions.Node(
-        package='ndt_scan_matcher',
-        executable='ndt_scan_matcher',
-        namespace='',
-        output="screen",
-        parameters=[os.path.join(share_dir, "config", "ndt_scan_matcher_param.yaml")],
-        respawn=True,
-    )
-    gpo_node = launch_ros.actions.Node(
-        package='grid_point_observer',
-        executable='grid_point_observer',
-        namespace='',
-        output="screen",
-        parameters=[os.path.join(get_package_share_directory('grid_point_observer'), "config", "grid_point_observer_param.yaml")],
-        respawn=True,
-    )
-    tf_broadcaster_node = launch_ros.actions.Node(
-        package='tf_broadcaster',
-        executable='tf_broadcaster',
-        namespace='',
-        output="screen",
-        parameters=[os.path.join(get_package_share_directory('tf_broadcaster'), "config", "tf_broadcaster_param.yaml")],
-        respawn=True,
-    )
-    return launch.LaunchDescription(
-        params +
-        # [wit_node, base_link_to_imu_link_node,ndt_node,tf_broadcaster_node, rviz2_node]
-        [wit_node, base_link_to_imu_link_node,ndt_node,gpo_node, rviz2_node]
-    )
+            # parameters=[{'use_sim_time': True}]
+        ),
+        Node(
+            package='ndt_scan_matcher',
+            executable='ndt_scan_matcher',
+            namespace='',
+            output="screen",
+            parameters=[os.path.join(pkg_dir, "config", "test_ndt_scan_matcher_param.yaml")],
+            respawn=True,
+        ),
+        Node(
+            package='grid_point_observer',
+            executable='grid_point_observer',
+            namespace='',
+            output="screen",
+            parameters=[os.path.join(get_package_share_directory('grid_point_observer'), "config", "test_grid_point_observer_param.yaml")],
+            respawn=True,
+        )
+    ]
+
+    return LaunchDescription(list)

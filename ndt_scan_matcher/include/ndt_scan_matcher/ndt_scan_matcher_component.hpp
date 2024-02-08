@@ -193,7 +193,7 @@ public:
         laser_pose_.orientation.set_rpy(x(0), x(1), x(2));
       }
       // publish
-      laser_pose_msg_.header = make_header(MAP_FRAME, rclcpp::Clock().now());
+      laser_pose_msg_.header = make_header(MAP_FRAME, get_cloud.header.stamp);
       laser_pose_msg_.pose   = make_geometry_pose(laser_pose_);
       laser_pose_pub_->publish(laser_pose_msg_);
       // update point cloud

@@ -1,0 +1,32 @@
+ndt_scan_matcher_node:
+  ros__parameters:
+    ndt_scan_matcher:
+      topic_name:
+        cloud: "/tugbot/points"
+        estimate_pose: "grid_point_observer/estimate_pose"
+        estimate_twist: "grid_point_observer/estimate_twist"
+        # estimate_pose: "tf_broadcaster/estimate_pose"
+        # estimate_twist: "tf_broadcaster/estimate_twist"
+      tf_frame:
+        map_frame: "map"
+        odom_frame: "odom"
+        robot_frame: "base_link"
+      broadcast_period: 0.001
+      odom_tf_broadcast: true
+      # 点群パラメータ
+      min_point_cloud_size: 100
+      filter:
+        voxelgrid_size: 0.05 # 0.06
+      ndt:
+        trans_epsilon: 0.0001 #0.00000001
+        step_size: 0.05 # 0.06
+        resolution: 0.1
+        max_iterations: 500.0
+        min_score_limit: 0.01
+      #カルマンフィルタ設定
+      kalman_filter:
+        use: false
+        # Q: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2] #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+        # R: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7] #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+        Q: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001] #システムノイズの共分散行列 (n*n) def [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+        R: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01] #観測ノイズの共分散行列 (p*p) def [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]

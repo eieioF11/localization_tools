@@ -94,7 +94,7 @@ public:
       // map -> odom tf
       if (ODOM_TF) {
         geometry_msgs::msg::TransformStamped transform_stamped;
-        transform_stamped.header         = make_header(MAP_FRAME, rclcpp::Clock().now());
+        transform_stamped.header         = make_header(MAP_FRAME, this->get_clock()->now());
         transform_stamped.child_frame_id = ODOM_FRAME;
         transform_stamped.transform      = make_geometry_transform(odom_pose_);
         broadcaster_.sendTransform(transform_stamped);
@@ -106,16 +106,16 @@ public:
       }
 
       geometry_msgs::msg::PoseStamped estimate_pose_msg;
-      estimate_pose_msg.header = make_header(MAP_FRAME, rclcpp::Clock().now());
+      estimate_pose_msg.header = make_header(MAP_FRAME, this->get_clock()->now());
       estimate_pose_msg.pose   = make_geometry_pose(estimate_pose_);
       geometry_msgs::msg::TwistStamped estimate_twist_msg;
-      estimate_twist_msg.header = make_header(ROBOT_FRAME, rclcpp::Clock().now());
+      estimate_twist_msg.header = make_header(ROBOT_FRAME, this->get_clock()->now());
       estimate_twist_msg.twist  = make_geometry_twist(estimate_twist_);
 
       estimate_pose_pub_->publish(estimate_pose_msg);
       estimate_twist_pub_->publish(estimate_twist_msg);
       geometry_msgs::msg::TransformStamped transform_stamped;
-      transform_stamped.header         = make_header(MAP_FRAME, rclcpp::Clock().now());
+      transform_stamped.header         = make_header(MAP_FRAME, this->get_clock()->now());
       transform_stamped.child_frame_id = ROBOT_FRAME;
       transform_stamped.transform      = make_geometry_transform(estimate_pose_);
       broadcaster_.sendTransform(transform_stamped);
@@ -137,7 +137,7 @@ public:
     }
     Vector3d rpy = imu_pose_.orientation.get_rpy() - init_imu_pose_.orientation.get_rpy();
     imu_pose_.orientation.set_rpy(rpy.x, rpy.y, rpy.z);
-    gpo_.set_deadreckoning(imu_pose_.position, imu_pose_.orientation.get_rpy(), odom_twist_); // てすと
+    // gpo_.set_deadreckoning(imu_pose_.position, imu_pose_.orientation.get_rpy(), odom_twist_); // てすと
   }
 
   void laser_pose_callback(const geometry_msgs::msg::PoseStamped::ConstPtr msg) {
