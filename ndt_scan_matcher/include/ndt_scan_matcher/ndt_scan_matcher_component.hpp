@@ -154,7 +154,8 @@ public:
     // NDT
     // Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(estimate_pose_));
     // Eigen::Matrix4f init_guess = get_transformation(make_geometry_pose(Pose3d{}));
-    Eigen::Matrix4f init_guess = get_eigen_matrix4(laser_pose_);
+    // Eigen::Matrix4f init_guess = get_eigen_matrix4(laser_pose_);
+    Eigen::Matrix4f init_guess = get_eigen_matrix4(estimate_pose_);
     // const auto &result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
     const auto& result = normal_distributions_transform(now_cloud, old_cloud_, ndt_param_, init_guess);
     if (!result) {
@@ -207,8 +208,9 @@ public:
       std::cout << "laser pose:" << std::endl;
       std::cout << laser_pose_ << std::endl;
 #endif
-      old_cloud_ += final_cloud;
-      old_cloud_ = voxelgrid_filter(old_cloud_, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
+      // old_cloud_ += final_cloud;
+      // old_cloud_ = voxelgrid_filter(old_cloud_, VOXELGRID_SIZE, VOXELGRID_SIZE, VOXELGRID_SIZE);
+      // old_cloud_ = final_cloud;
     } else
       RCLCPP_WARN(this->get_logger(), "Exceeding score limits");
   }
